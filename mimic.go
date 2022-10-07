@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 	tls "github.com/refraction-networking/utls"
+	"log"
 	"net"
 	"os"
+	"time"
 )
 
 func usage() {
@@ -249,6 +251,53 @@ var SpecOpenSsl = tls.ClientHelloSpec{
 	},
 }
 
+func test(id string, spec *tls.ClientHelloSpec, host *string, sni *string, skipVerify *bool, timeout *time.Duration) {
+
+	d := net.Dialer{Timeout: *timeout}
+	tcpConn, err := d.Dial("tcp", *host)
+	if err != nil {
+		fmt.Printf("RES %s conn_timeout\n", id)
+		log.Printf("%s net.Dial() failed: %+v\n", id, err)
+		return
+	}
+	log.Printf("%s Connected\n", id)
+
+	var tlsConfig tls.Config
+	if sni != nil {
+		tlsConfig = tls.Config{ServerName: *sni, InsecureSkipVerify: *skipVerify}
+	} else {
+		// Even though there's an SNI extension below, if we don't provide ServerName,
+		// it won't populate and will remove the extension. Neat!
+		tlsConfig = tls.Config{InsecureSkipVerify: true}
+	}
+	// This fingerprint includes feature(s), not fully supported by TLS.
+	// uTLS client with this fingerprint will only be able to to talk to servers,
+	// that also do not support those features.
+	tlsConn := tls.UClient(tcpConn, &tlsConfig, tls.HelloCustom)
+	tlsConn.ApplyPreset(spec)
+
+	n, err := tlsConn.Write([]byte(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\n\r\n", *host)))
+	if err != nil {
+		fmt.Printf("RES %s handshake_timeout\n", id)
+		log.Printf("Error sending: %v\n", err)
+		return
+	}
+	// or tlsConn.Handshake() for better control
+	log.Printf("%s Wrote %d bytes\n", id, n)
+	//fmt.Printf("Grease: %d\n", tlsConn.HandshakeState.Hello.Raw[7*16+2])
+
+	buf := make([]byte, 500)
+	n, err = tlsConn.Read(buf)
+	if err != nil {
+		fmt.Printf("RES %s read_timeout\n", id)
+		log.Printf("Error receiving: %v\n", err)
+		return
+	}
+	log.Printf("%s Read %d bytes\n", id, n)
+
+	fmt.Printf("RES %s allowed\n", id)
+}
+
 func main() {
 
 	flag.Usage = usage
@@ -258,29 +307,27 @@ func main() {
 	fprint := flag.String("fprint", "chrome-105", "Fingerprint to send. Currently supported: chrome-105, go, openssl")
 	nosni := flag.Bool("nosni", false, "Provide if you don't want to send an SNI")
 	isv := flag.Bool("insecureSkipVerify", false, "Set if you want to not check certs")
+	timeout := flag.Duration("timeout", 6*time.Second, "timeout value of TCP connections.")
+	logFile := flag.String("log", "", "log to file.  (default stderr)")
 	flag.Parse()
+
+	// log, intentionally make it blocking to make sure it got
+	// initiliazed before other parts using it
+	if *logFile != "" {
+		f, err := os.Create(*logFile)
+		if err != nil {
+			log.Panicln("failed to open log file", err)
+		}
+		defer f.Close()
+		log.SetOutput(f)
+	}
 
 	if *sni == "" {
 		sni = host
 	}
 
-	tcpConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", *host, *port))
-	if err != nil {
-		fmt.Printf("net.Dial() failed: %+v\n", err)
-		return
-	}
-	fmt.Printf("Connected to %s\n", *host)
+	addr := fmt.Sprintf("%s:%d", *host, *port)
 
-	tlsConfig := tls.Config{ServerName: *sni, InsecureSkipVerify: *isv}
-	if *nosni {
-		// Even though there's an SNI extension below, if we don't provide ServerName,
-		// it won't populate and will remove the extension. Neat!
-		tlsConfig = tls.Config{InsecureSkipVerify: true}
-	}
-	// This fingerprint includes feature(s), not fully supported by TLS.
-	// uTLS client with this fingerprint will only be able to to talk to servers,
-	// that also do not support those features.
-	tlsConn := tls.UClient(tcpConn, &tlsConfig, tls.HelloCustom)
 	var clientHelloSpec tls.ClientHelloSpec
 	if *fprint == "chrome-105" {
 		clientHelloSpec = SpecChrome105
@@ -289,26 +336,13 @@ func main() {
 	} else if *fprint == "openssl" {
 		clientHelloSpec = SpecOpenSsl
 	} else {
-		fmt.Printf("Error unknown fprint: %s\n", *fprint)
+		log.Fatalf("Error unknown fprint: %s\n", *fprint)
+		return
 	}
 
-	tlsConn.ApplyPreset(&clientHelloSpec)
-
-	//fmt.Printf("Grease seed: %d\n", tlsConn.greaseSeed)
-
-	n, err := tlsConn.Write([]byte("GET / HTTP/1.1\r\nHost: tlsfingerprint.io\r\n\r\n"))
-	if err != nil {
-		fmt.Printf("Error sending: %v\n", err)
+	id := fmt.Sprintf("%s_%s_%s", *host, *sni, *fprint)
+	if *nosni {
+		sni = nil
 	}
-	// or tlsConn.Handshake() for better control
-	fmt.Printf("Wrote %d bytes\n", n)
-	//fmt.Printf("Grease: %d\n", tlsConn.HandshakeState.Hello.Raw[7*16+2])
-
-	buf := make([]byte, 500)
-	n, err = tlsConn.Read(buf)
-	if err != nil {
-		fmt.Printf("Error receiving: %v\n", err)
-	}
-	fmt.Printf("Read %d bytes:\n%s\n", n, buf)
-
+	test(id, &clientHelloSpec, &addr, sni, isv, timeout)
 }
