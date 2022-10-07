@@ -301,6 +301,12 @@ func test(job Job, skipVerify bool, timeout time.Duration) {
 	}
 	log.Printf("%s Connected\n", job.Str())
 
+	err = tcpConn.SetReadDeadline(time.Now().Add(timeout))
+	if err != nil {
+		log.Printf("%s setReadDeadline failed: %+v\n", job.Str(), err)
+		return
+	}
+
 	// Setup TLS
 	var tlsConfig tls.Config
 	if job.Sni != "" {
